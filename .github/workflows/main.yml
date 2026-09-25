@@ -1,0 +1,770 @@
+# ChromeXt API102 — 自包含构建 yml
+# 用法：放到 fork 仓库的 .github/workflows/chromext-api102.yml，手动触发或打 v* tag
+# 上游业务源码每次 clone 最新；本文件覆盖 API 102 接入层（3 个 .kt + 2 个 patch + 元数据）
+# 生成：2026-09-25
+name: ChromeXt API102
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: "versionCode"
+        required: false
+        default: "17"
+      version_name:
+        description: "versionName"
+        required: false
+        default: "3.8.3-api102"
+      upstream_ref:
+        description: "上游 ref"
+        required: false
+        default: "master"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      # ============================================================
+      # 1. 拉上游全量业务源码（Chromium/WebView 双支持的那一版）
+      # ============================================================
+      - name: Fetch upstream
+        run: |
+          set -e
+          REF="${{ github.event.inputs.upstream_ref || 'master' }}"
+          git clone --depth=1 --branch "$REF" https://github.com/JingMatrix/ChromeXt.git src
+          git -C src log -1 --format='upstream: %H %s'
+
+      # ============================================================
+      # 2. 覆盖构建脚本（依赖级 legacy -> libxposed API 102）
+      # ============================================================
+      - name: Overlay build scripts
+        working-directory: src
+        run: |
+          set -e
+          mkdir -p app/src/main/resources/META-INF/xposed
+
+          # ==== [FILE] app/build.gradle.kts ====
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("com.ncorti.ktfmt.gradle")
+          }
+
+          android {
+              compileSdk = 35
+              namespace = "org.matrix.chromext"
+
+              defaultConfig {
+                  applicationId = "org.matrix.chromext"
+                  minSdk = 23
+                  targetSdk = 35
+                  versionCode = (System.getenv("VERSION_CODE") ?: "17").toInt()
+                  versionName = System.getenv("VERSION_NAME") ?: "3.8.3-api102"
+              }
+
+              buildFeatures { buildConfig = true }
+
+              buildTypes {
+                  release {
+                      isShrinkResources = true
+                      isMinifyEnabled = true
+                      proguardFiles("proguard-rules.pro")
+                  }
+              }
+
+              // 仍用于 Resource.enrich 的反射 addAssetPath（模块 assets 注入目标进程）
+              androidResources {
+                  additionalParameters += listOf("--allow-reserved-package-id", "--package-id", "0x42")
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_21
+                  targetCompatibility = JavaVersion.VERSION_21
+              }
+
+              lint {
+                  disable +=
+                      listOf(
+                          "Internationalization",
+                          "UnsafeIntentLaunch",
+                          "SetJavaScriptEnabled",
+                          "UnspecifiedRegisterReceiverFlag",
+                          "Usability:Icons",
+                      )
+              }
+          }
+
+          dependencies {
+              // legacy 为 de.robv.android.xposed:api:82
+              compileOnly("io.github.libxposed:api:102.0.0")
+          }
+          EOF
+
+          # ==== [FILE] app/proguard-rules.pro ====
+          cat > app/proguard-rules.pro <<'EOF'
+          # libxposed API 102 官方 keep 规则
+          -dontwarn io.github.libxposed.annotation.**
+          -adaptresourcefilecontents META-INF/xposed/java_init.list
+          -keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
+              public <init>();
+          }
+          EOF
+
+      # ============================================================
+      # 3. 覆盖模块元数据（替代 Manifest meta-data + assets/xposed_init）
+      # ============================================================
+      - name: Overlay module metadata
+        working-directory: src
+        run: |
+          set -e
+          D=app/src/main/resources/META-INF/xposed
+
+          # staticScope=false：WebView 系浏览器是开放集合，由用户在 LSPosed 里自由勾选
+          # ==== [FILE] "$D/module.prop" ====
+          cat > "$D/module.prop" <<'EOF'
+          minApiVersion=102
+          targetApiVersion=102
+          staticScope=false
+          EOF
+
+          # ==== [FILE] "$D/java_init.list" ====
+          cat > "$D/java_init.list" <<'EOF'
+          org.matrix.chromext.MainHook
+          EOF
+
+          # ==== [FILE] "$D/scope.list" ====
+          cat > "$D/scope.list" <<'EOF'
+          app.vanadium.browser
+          com.android.chrome
+          com.brave.browser
+          com.brave.browser_beta
+          com.brave.browser_nightly
+          com.chrome.beta
+          com.chrome.canary
+          com.chrome.dev
+          com.coccoc.trinhduyet
+          com.coccoc.trinhduyet_beta
+          com.herond.android.browser
+          com.kiwibrowser.browser
+          com.microsoft.emmx
+          com.microsoft.emmx.beta
+          com.microsoft.emmx.canary
+          com.microsoft.emmx.dev
+          com.naver.whale
+          com.sec.android.app.sbrowser
+          com.sec.android.app.sbrowser.beta
+          com.vivaldi.browser
+          com.vivaldi.browser.snapshot
+          org.axpos.aosmium
+          org.bromite.bromite
+          org.chromium.chrome
+          org.chromium.thorium
+          org.cromite.cromite
+          org.greatfire.freebrowser
+          org.triple.banana
+          us.spotco.mulch
+          EOF
+
+      # ============================================================
+      # 4. 覆盖 Xposed 接入层 —— Hook.kt（legacy XC_MethodHook -> API 102 intercept 链）
+      #    保留 HookParam.thisObject / args / result 字段语义，业务类零改动
+      # ============================================================
+      - name: Overlay Hook.kt
+        working-directory: src
+        run: |
+          set -e
+          # ==== [FILE] app/src/main/java/org/matrix/chromext/utils/Hook.kt ====
+          cat > app/src/main/java/org/matrix/chromext/utils/Hook.kt <<'EOF'
+          package org.matrix.chromext.utils
+
+          import io.github.libxposed.api.XposedInterface
+          import io.github.libxposed.api.XposedModule
+          import java.lang.reflect.Constructor
+          import java.lang.reflect.Executable
+          import java.lang.reflect.Method
+
+          /**
+           * 兼容层：保留 legacy XC_MethodHook.MethodHookParam 的字段语义
+           * （thisObject / args / result），使 ChromeXt 业务类不改一行即可编译。
+           */
+          class HookParam(
+              var thisObject: Any?,
+              var args: Array<Any?>,
+              var result: Any?,
+          ) {
+              private var resultSet = false
+
+              /** 对应 legacy param.setResult()：before 阶段调用会短路原方法 */
+              fun setResult(value: Any?) {
+                  result = value
+                  resultSet = true
+              }
+
+              internal fun consumeResultSet(): Boolean {
+                  val v = resultSet
+                  resultSet = false
+                  return v
+              }
+          }
+
+          /** 对应 legacy XC_MethodHook.Unhook */
+          class Unhook(private val handle: XposedInterface.HookHandle) {
+              fun unhook() {
+                  handle.unhook()
+              }
+          }
+
+          typealias Hooker = (param: HookParam) -> Unit
+
+          class XposedHookFactory(private val priority: Int = HookBridge.PRIORITY_DEFAULT) {
+              private var beforeMethod: Hooker? = null
+              private var afterMethod: Hooker? = null
+
+              fun before(before: Hooker) {
+                  beforeMethod = before
+              }
+
+              fun after(after: Hooker) {
+                  afterMethod = after
+              }
+
+              internal fun install(e: Executable): Unhook =
+                  HookBridge.hookExecutable(e, priority, beforeMethod, afterMethod)
+          }
+
+          /** 唯一持有 XposedModule 的桥；由 MainHook.onModuleLoaded 注入 */
+          object HookBridge {
+              const val PRIORITY_DEFAULT = 50
+              const val PRIORITY_HIGHEST = Int.MAX_VALUE
+              const val PRIORITY_LOWEST = Int.MIN_VALUE
+
+              @Volatile
+              private var module: XposedModule? = null
+
+              fun attach(m: XposedModule) {
+                  module = m
+              }
+
+              fun hookExecutable(
+                  e: Executable,
+                  priority: Int,
+                  before: Hooker?,
+                  after: Hooker?,
+              ): Unhook {
+                  val m = module ?: error("HookBridge is not attached to XposedModule")
+                  val handle =
+                      m.hook(e)
+                          .setPriority(priority)
+                          .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                          .intercept { chain ->
+                              val raw = chain.getArgs()
+                              val args = arrayOfNulls<Any?>(raw.size)
+                              for (i in raw.indices) args[i] = raw[i]
+                              val param = HookParam(chain.getThisObject(), args, null)
+                              if (before != null) {
+                                  try {
+                                      before.invoke(param)
+                                  } catch (t: Throwable) {
+                                      Log.ex(t)
+                                  }
+                                  // legacy 语义：before 阶段 setResult 即短路，不 proceed
+                                  if (param.consumeResultSet()) return@intercept param.result
+                              }
+                              param.result = chain.proceed()
+                              if (after != null) {
+                                  try {
+                                      after.invoke(param)
+                                  } catch (t: Throwable) {
+                                      Log.ex(t)
+                                  }
+                              }
+                              param.result
+                          }
+                  return Unhook(handle)
+              }
+          }
+
+          val PRIORITY_DEFAULT = HookBridge.PRIORITY_DEFAULT
+
+          fun Method.hookBefore(priority: Int = PRIORITY_DEFAULT, hook: Hooker): Unhook =
+              HookBridge.hookExecutable(this, priority, hook, null)
+
+          fun Method.hookAfter(priority: Int = PRIORITY_DEFAULT, hooker: Hooker): Unhook =
+              HookBridge.hookExecutable(this, priority, null, hooker)
+
+          fun Constructor<*>.hookBefore(priority: Int = PRIORITY_DEFAULT, hook: Hooker): Unhook =
+              HookBridge.hookExecutable(this, priority, hook, null)
+
+          fun Constructor<*>.hookAfter(priority: Int = PRIORITY_DEFAULT, hooker: Hooker): Unhook =
+              HookBridge.hookExecutable(this, priority, null, hooker)
+
+          fun Method.hookMethod(
+              priority: Int = PRIORITY_DEFAULT,
+              hook: XposedHookFactory.() -> Unit,
+          ): Unhook {
+              val factory = XposedHookFactory(priority)
+              hook(factory)
+              return factory.install(this)
+          }
+
+          fun Constructor<*>.hookMethod(
+              priority: Int = PRIORITY_DEFAULT,
+              hook: XposedHookFactory.() -> Unit,
+          ): Unhook {
+              val factory = XposedHookFactory(priority)
+              hook(factory)
+              return factory.install(this)
+          }
+          EOF
+
+      # ============================================================
+      # 5. 覆盖 Xposed 接入层 —— Log.kt（XposedBridge.log -> module.log）
+      # ============================================================
+      - name: Overlay Log.kt
+        working-directory: src
+        run: |
+          set -e
+          # ==== [FILE] app/src/main/java/org/matrix/chromext/utils/Log.kt ====
+          cat > app/src/main/java/org/matrix/chromext/utils/Log.kt <<'EOF'
+          package org.matrix.chromext.utils
+
+          import android.content.Context
+          import android.util.Log as AndroidLog
+          import android.widget.Toast
+          import io.github.libxposed.api.XposedModule
+          import java.lang.ref.WeakReference
+          import org.matrix.chromext.BuildConfig
+          import org.matrix.chromext.TAG
+
+          /** 由 MainHook.onModuleLoaded 注入，用于把日志送到 LSPosed 面板 */
+          object XposedLogBridge {
+              @Volatile
+              var module: XposedModule? = null
+          }
+
+          object Log {
+              private var lastToast: WeakReference<Toast>? = null
+
+              fun i(msg: String) {
+                  AndroidLog.i(TAG, msg)
+                  XposedLogBridge.module?.log(AndroidLog.INFO, TAG, msg)
+              }
+
+              fun d(msg: String, full: Boolean = false) {
+                  if (BuildConfig.DEBUG) {
+                      if (!full && msg.length > 300) {
+                          AndroidLog.d(TAG, msg.take(300) + " ...")
+                      } else {
+                          AndroidLog.d(TAG, msg)
+                      }
+                  }
+              }
+
+              fun w(msg: String) {
+                  AndroidLog.w(TAG, msg)
+              }
+
+              fun e(msg: String) {
+                  AndroidLog.e(TAG, msg)
+                  XposedLogBridge.module?.log(AndroidLog.ERROR, TAG, "ChromeXt error: " + msg)
+              }
+
+              fun ex(thr: Throwable, msg: String = "") {
+                  AndroidLog.e(TAG, msg, thr)
+                  XposedLogBridge.module?.log(
+                      AndroidLog.ERROR,
+                      TAG,
+                      "ChromeXt exception caught: [" + msg + "] " + thr.toString(),
+                  )
+              }
+
+              fun toast(context: Context, msg: String) {
+                  lastToast?.get()?.cancel()
+                  val toast = Toast.makeText(context, msg, Toast.LENGTH_SHORT)
+                  toast.show()
+                  lastToast = WeakReference(toast)
+              }
+          }
+          EOF
+
+      # ============================================================
+      # 6. 覆盖 Xposed 接入层 —— MainHook.kt
+      #    legacy: IXposedHookLoadPackage + IXposedHookZygoteInit
+      #    API102: XposedModule.onModuleLoaded + onPackageReady
+      #    四分支与上游 handleLoadPackage 逐行对应，含 WebView 系兜底
+      # ============================================================
+      - name: Overlay MainHook.kt
+        working-directory: src
+        run: |
+          set -e
+          # ==== [FILE] app/src/main/java/org/matrix/chromext/MainHook.kt ====
+          cat > app/src/main/java/org/matrix/chromext/MainHook.kt <<'EOF'
+          package org.matrix.chromext
+
+          import android.content.Context
+          import android.webkit.WebChromeClient
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import io.github.libxposed.api.XposedModule
+          import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
+          import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
+          import org.matrix.chromext.hook.BaseHook
+          import org.matrix.chromext.hook.ContextMenuHook
+          import org.matrix.chromext.hook.PageInfoHook
+          import org.matrix.chromext.hook.PageMenuHook
+          import org.matrix.chromext.hook.PreferenceHook
+          import org.matrix.chromext.hook.UserScriptHook
+          import org.matrix.chromext.hook.WebViewHook
+          import org.matrix.chromext.utils.HookBridge
+          import org.matrix.chromext.utils.Log
+          import org.matrix.chromext.utils.XposedLogBridge
+          import org.matrix.chromext.utils.findMethodOrNull
+          import org.matrix.chromext.utils.hookAfter
+
+          val supportedPackages =
+              arrayOf(
+                  "app.vanadium.browser",
+                  "com.android.chrome",
+                  "com.brave.browser",
+                  "com.brave.browser_beta",
+                  "com.brave.browser_nightly",
+                  "com.chrome.beta",
+                  "com.chrome.canary",
+                  "com.chrome.dev",
+                  "com.coccoc.trinhduyet",
+                  "com.coccoc.trinhduyet_beta",
+                  "com.herond.android.browser",
+                  "com.kiwibrowser.browser",
+                  "com.microsoft.emmx",
+                  "com.microsoft.emmx.beta",
+                  "com.microsoft.emmx.canary",
+                  "com.microsoft.emmx.dev",
+                  "com.naver.whale",
+                  "com.sec.android.app.sbrowser",
+                  "com.sec.android.app.sbrowser.beta",
+                  "com.vivaldi.browser",
+                  "com.vivaldi.browser.snapshot",
+                  "org.axpos.aosmium",
+                  "org.bromite.bromite",
+                  "org.chromium.chrome",
+                  "org.chromium.thorium",
+                  "org.cromite.cromite",
+                  "org.greatfire.freebrowser",
+                  "org.triple.banana",
+                  "us.spotco.mulch",
+              )
+
+          class MainHook : XposedModule() {
+
+              private var processName: String = ""
+
+              override fun onModuleLoaded(param: ModuleLoadedParam) {
+                  processName = param.processName
+                  HookBridge.attach(this)
+                  XposedLogBridge.module = this
+                  // 替代 legacy initZygote(startupParam.modulePath)
+                  Resource.init(moduleApplicationInfo.sourceDir)
+              }
+
+              override fun onPackageReady(param: PackageReadyParam) {
+                  val packageName = param.packageName
+                  val classLoader = param.classLoader
+                  Log.d("$processName started")
+                  if (packageName == "org.matrix.chromext") return
+
+                  if (supportedPackages.contains(packageName)) {
+                      // Chromium 系：hook WindowAndroid 中首参为 Context 的构造器
+                      classLoader
+                          .loadClass("org.chromium.ui.base.WindowAndroid")
+                          .declaredConstructors
+                          .filter {
+                              it.parameterTypes.firstOrNull()?.let { p ->
+                                  Context::class.java.isAssignableFrom(p)
+                              } == true
+                          }
+                          .forEach { ctor ->
+                              ctor.hookAfter {
+                                  Chrome.init(it.args[0] as Context, packageName)
+                                  initHooks(UserScriptHook)
+                                  if (ContextMenuHook.isInit) return@hookAfter
+                                  runCatching {
+                                      if (!Chrome.isVivaldi) initHooks(PreferenceHook)
+                                      initHooks(
+                                          if (Chrome.isEdge || Chrome.isCocCoc) PageInfoHook
+                                          else PageMenuHook
+                                      )
+                                  }
+                                      .onFailure {
+                                          initHooks(ContextMenuHook)
+                                          if (BuildConfig.DEBUG && !(Chrome.isSamsung || Chrome.isEdge))
+                                              Log.ex(it)
+                                      }
+                              }
+                          }
+                  } else {
+                      val ctx = currentApplication()
+                      Chrome.isMi =
+                          Chrome.isMi ||
+                              packageName == "com.mi.globalbrowser" ||
+                              packageName == "com.android.browser"
+                      Chrome.isQihoo = packageName == "com.qihoo.contents"
+                      if (ctx == null && Chrome.isMi) return
+                      // Wait to get the browser context of Mi Browser
+                      if (ctx != null && packageName != "android") Chrome.init(ctx, ctx.packageName)
+
+                      if (Chrome.isMi) {
+                          WebViewHook.WebView = Chrome.load("com.miui.webkit.WebView")
+                          runCatching {
+                              WebViewHook.ViewClient =
+                                  Chrome.load("com.android.browser.tab.TabWebViewClient")
+                              WebViewHook.ChromeClient =
+                                  Chrome.load("com.android.browser.tab.TabWebChromeClient")
+                          }
+                              .onFailure {
+                                  // Use MiuiAutologinBar to find com.android.browser.tab.Tab
+                                  val miuiAutologinBar =
+                                      Chrome.load("com.android.browser.MiuiAutologinBar")
+                                  val fields = miuiAutologinBar.declaredFields.map { it.type }
+                                  val tab =
+                                      miuiAutologinBar.declaredMethods
+                                          .find {
+                                              it.parameterCount == 2 &&
+                                                  it.parameterTypes[1] == Boolean::class.java &&
+                                                  !fields.contains(it.parameterTypes[0])
+                                          }!!
+                                          .run { parameterTypes[0] }
+                                  tab.declaredFields.forEach {
+                                      if (findMethodOrNull(it.type) {
+                                          name == "onGeolocationPermissionsHidePrompt"
+                                      } != null)
+                                          WebViewHook.ChromeClient = it.type
+                                      if (findMethodOrNull(it.type) {
+                                          name == "onReceivedHttpAuthRequest"
+                                      } != null)
+                                          WebViewHook.ViewClient = it.type
+                                  }
+                              }
+                          hookWebView()
+                          return
+                      }
+                      if (Chrome.isQihoo) {
+                          WebViewHook.WebView = Chrome.load("com.qihoo.webkit.WebView")
+                          WebViewHook.ViewClient = Chrome.load("com.qihoo.webkit.WebViewClient")
+                          WebViewHook.ChromeClient =
+                              Chrome.load("com.qihoo.webkit.WebChromeClient")
+                          hookWebView()
+                          return
+                      }
+
+                      // 通用兜底：framework 类构造器，任意 WebView 宿主 App 生效
+                      WebViewClient::class.java.declaredConstructors[0].hookAfter {
+                          val obj = it.thisObject
+                          if (obj != null && obj.javaClass != WebViewClient::class.java) {
+                              WebViewHook.ViewClient = obj.javaClass
+                              hookWebView()
+                          }
+                      }
+                      WebChromeClient::class.java.declaredConstructors[0].hookAfter {
+                          val obj = it.thisObject
+                          if (obj != null && obj.javaClass != WebChromeClient::class.java) {
+                              WebViewHook.ChromeClient = obj.javaClass
+                              hookWebView()
+                          }
+                      }
+                  }
+              }
+
+              private fun hookWebView() {
+                  if (WebViewHook.ChromeClient == null || WebViewHook.ViewClient == null) return
+                  if (WebViewHook.WebView == null) {
+                      runCatching {
+                          WebViewHook.WebView = WebView::class.java
+                          WebView.setWebContentsDebuggingEnabled(true)
+                      }
+                          .onFailure { if (BuildConfig.DEBUG) Log.ex(it) }
+                  }
+                  initHooks(WebViewHook, ContextMenuHook)
+              }
+
+              private fun initHooks(vararg hook: BaseHook) {
+                  hook.forEach {
+                      if (it.isInit) return@forEach
+                      it.init()
+                      if (it.isInit) Log.d("${it.javaClass.simpleName} hooked")
+                  }
+              }
+
+              /** 替代 legacy AndroidAppHelper.currentApplication()（API 102 不提供） */
+              private fun currentApplication(): Context? {
+                  return try {
+                      Class.forName("android.app.ActivityThread")
+                          .getMethod("currentApplication")
+                          .invoke(null) as? Context
+                  } catch (t: Throwable) {
+                      Log.d("currentApplication() unavailable: " + t)
+                      null
+                  }
+              }
+          }
+          EOF
+
+      # ============================================================
+      # 7. 修正 2 个业务文件的 Unhook 类型引用（只动 import 与类型名，逻辑零改动）
+      #    其余 hook 类（WebView/UserScript/PageInfo/Preference）签名已被 Hook.kt 覆盖
+      # ============================================================
+      - name: Patch Unhook type references
+        working-directory: src
+        run: |
+          set -e
+          grep -rl 'de\.robv\.android\.xposed' app/src/main/java | tee /tmp/legacy_refs.txt
+          echo "--- files still referencing legacy API above ---"
+
+          # 统一替换 import 与类型限定名
+          for f in app/src/main/java/org/matrix/chromext/hook/ContextMenu.kt \
+                   app/src/main/java/org/matrix/chromext/hook/PageMenu.kt ; do
+            [ -f "$f" ] || { echo "MISSING $f"; exit 1; }
+            sed -i 's/^import de\.robv\.android\.xposed\.XC_MethodHook\.Unhook$/import org.matrix.chromext.utils.Unhook/' "$f"
+            sed -i 's/de\.robv\.android\.xposed\.XC_MethodHook\.Unhook/org.matrix.chromext.utils.Unhook/g' "$f"
+            echo "patched: $f"
+          done
+
+          echo "--- remaining legacy refs (should be empty) ---"
+          grep -rn 'de\.robv\.android\.xposed' app/src/main/java || echo "OK: none"
+
+      # ============================================================
+      # 8. 删除 legacy 入口（assets/xposed_init + Manifest 四个 meta-data）
+      # ============================================================
+      - name: Remove legacy entry
+        working-directory: src
+        run: |
+          set -e
+          rm -f app/src/main/assets/xposed_init
+          echo "removed assets/xposed_init"
+
+          MF=app/src/main/AndroidManifest.xml
+          python3 - "$MF" <<'PYEOF'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          for name in ('xposedmodule', 'xposeddescription', 'xposedminversion', 'xposedscope'):
+              # 同时匹配自闭合与带结束标签两种写法
+              s = re.sub(r'\s*<meta-data\b[^>]*android:name="%s"[^>]*/>' % name, '', s)
+              s = re.sub(r'\s*<meta-data\b[^>]*android:name="%s"[^>]*>\s*</meta-data>' % name, '', s)
+          open(p, 'w', encoding='utf-8').write(s)
+          left = re.findall(r'android:name="(xposed\w*)"', s)
+          print('remaining xposed meta-data:', left if left else 'none')
+          PYEOF
+
+      # ============================================================
+      # 9. 结构自检（yml 里三个静默陷阱的对应检查）
+      # ============================================================
+      - name: Structure self-check
+        working-directory: src
+        run: |
+          set -e
+          echo "--- files created/overlaid ---"
+          ls -l app/src/main/resources/META-INF/xposed/
+          for f in app/build.gradle.kts app/proguard-rules.pro \
+                   app/src/main/java/org/matrix/chromext/MainHook.kt \
+                   app/src/main/java/org/matrix/chromext/utils/Hook.kt \
+                   app/src/main/java/org/matrix/chromext/utils/Log.kt ; do
+            printf '%8s  %s\n' "$(wc -c < "$f")" "$f"
+          done
+
+          echo "--- assert no legacy api import ---"
+          ! grep -rn 'de\.robv\.android\.xposed' app/src/main/java
+
+          echo "--- assert no xposed_init / meta-data ---"
+          test ! -e app/src/main/assets/xposed_init
+          ! grep -q 'xposedmodule' app/src/main/AndroidManifest.xml
+
+          echo "--- assert hook signature surface ---"
+          grep -c 'XposedInterface' app/src/main/java/org/matrix/chromext/utils/Hook.kt
+
+      # ============================================================
+      # 10. 构建
+      # ============================================================
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Build release
+        working-directory: src
+        env:
+          VERSION_CODE: ${{ github.event.inputs.version_code || '17' }}
+          VERSION_NAME: ${{ github.event.inputs.version_name || '3.8.3-api102' }}
+        run: |
+          set -e
+          chmod +x gradlew
+          ./gradlew app:assembleRelease --no-daemon --stacktrace
+
+      # ============================================================
+      # 11. 签名（secret 优先；未配置则产出未签名包）
+      # ============================================================
+      - name: Sign APK
+        working-directory: src
+        run: |
+          set -e
+          UNSIGNED=$(find app/build/outputs/apk/release -name '*.apk' | head -n1)
+          echo "unsigned=$UNSIGNED"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          if [ -n "${{ secrets.KEYSTORE_B64 }}" ]; then
+            printf '%s' "${{ secrets.KEYSTORE_B64 }}" | base64 --decode > "$RUNNER_TEMP/release.jks"
+            "$BT/apksigner" sign \
+              --ks "$RUNNER_TEMP/release.jks" \
+              --ks-pass "pass:${{ secrets.KEYSTORE_PASS }}" \
+              --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
+              --key-pass "pass:${{ secrets.KEY_PASS }}" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              --v3-signing-enabled true \
+              --out "$GITHUB_WORKSPACE/ChromeXt-api102.apk" "$UNSIGNED"
+          else
+            echo "KEYSTORE_B64 not set, output will be unsigned"
+            cp "$UNSIGNED" "$GITHUB_WORKSPACE/ChromeXt-api102.apk"
+          fi
+          "$BT/apksigner" verify --print-certs "$GITHUB_WORKSPACE/ChromeXt-api102.apk" || true
+          "$BT/aapt" dump badging "$GITHUB_WORKSPACE/ChromeXt-api102.apk" | head -5 || true
+
+      # ============================================================
+      # 12. 校验产物内部结构（module.prop / java_init.list / scope.list 是否真进包）
+      # ============================================================
+      - name: Verify APK contents
+        run: |
+          set -e
+          APK="$GITHUB_WORKSPACE/ChromeXt-api102.apk"
+          unzip -l "$APK" | grep -E 'META-INF/xposed/|assets/xposed_init|libxposed' || true
+          echo "--- must contain all three ---"
+          unzip -l "$APK" | grep -q 'META-INF/xposed/module.prop'
+          unzip -l "$APK" | grep -q 'META-INF/xposed/java_init.list'
+          unzip -l "$APK" | grep -q 'META-INF/xposed/scope.list'
+          echo "--- must NOT contain legacy entry ---"
+          ! unzip -l "$APK" | grep -q 'assets/xposed_init'
+          echo "OK"
+
+      # ============================================================
+      # 13. 上传产物 + 打 tag 时自动发 Release
+      # ============================================================
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChromeXt-api102
+          path: ChromeXt-api102.apk
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ChromeXt-api102.apk
+          generate_release_notes: true
