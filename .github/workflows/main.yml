@@ -948,7 +948,6 @@ jobs:
           key: chromext-api102-ks-v1
 
       - name: Sign APK
-        working-directory: src      - name: Sign APK
         working-directory: src
         run: |
           set -e
@@ -999,7 +998,7 @@ jobs:
               --v3-signing-enabled true \
               --out "$GITHUB_WORKSPACE/ChromeXt-api102.apk" "$UNSIGNED"
           else
-            echo "::warning::no keystore secret (KEYSTORE_B64/SIGNING_KEY + *_PASS + ALIAS) -> APK will be UNSIGNED"
+            echo "::warning::keystore 不可用（secret 无效且 keytool 生成失败）-> APK 未签名"
             cp "$UNSIGNED" "$GITHUB_WORKSPACE/ChromeXt-api102.apk"
           fi
           "$BT/apksigner" verify --print-certs "$GITHUB_WORKSPACE/ChromeXt-api102.apk" || true
