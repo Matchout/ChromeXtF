@@ -498,6 +498,8 @@ jobs:
           package org.matrix.chromext
 
           import android.content.Context
+          import android.os.Handler
+          import android.os.Looper
           import android.webkit.WebChromeClient
           import android.webkit.WebView
           import android.webkit.WebViewClient
@@ -603,6 +605,14 @@ jobs:
                                               })
                                   }
                                       .onFailure { Log.i("TabWCDAI dump FAILED: " + it) }
+                                  // 诊断：mIsLoading 到底解析到了哪个字段（Chrome 155 字段名全混淆）
+                                  runCatching {
+                                      Log.i(
+                                          "proxy mIsLoading -> " +
+                                              org.matrix.chromext.proxy.UserScriptProxy.mIsLoading
+                                                  .name)
+                                  }
+                                      .onFailure { Log.i("mIsLoading resolve FAILED: " + it) }
                                   initHooks(UserScriptHook)
                                   if (ContextMenuHook.isInit) return@hookAfter
                                   runCatching {
@@ -613,10 +623,54 @@ jobs:
                                       )
                                   }
                                       .onFailure {
+                                          // 无条件打印：Chrome 155 上 PageMenuHook 会静默失败在这里
+                                          Log.ex(it, "PageMenu/PageInfo hook init failed")
                                           initHooks(ContextMenuHook)
-                                          if (BuildConfig.DEBUG && !(Chrome.isSamsung || Chrome.isEdge))
-                                              Log.ex(it)
                                       }
+                                  // 端到端探测：JS 注入链路是否通（决定前端是否报 "ChromeXt is not installed"）
+                                  try {
+                                      Handler(Looper.getMainLooper())
+                                          .postDelayed(
+                                              {
+                                                  runCatching {
+                                                      Log.i(
+                                                          "probe Local.name=" +
+                                                              org.matrix.chromext.script.Local
+                                                                  .name)
+                                                  }
+                                                      .onFailure {
+                                                          Log.i(
+                                                              "probe Local.<clinit> FAILED: " + it)
+                                                      }
+                                                  runCatching {
+                                                      val tab = Chrome.getTab()
+                                                      Log.i(
+                                                          "probe tab=" +
+                                                              (tab != null) +
+                                                              " checkTab=" +
+                                                              Chrome.checkTab(tab) +
+                                                              " url=" +
+                                                              Chrome.getUrl())
+                                                  }
+                                                      .onFailure {
+                                                          Log.i(
+                                                              "probe tab/checkTab FAILED: " + it)
+                                                      }
+                                                  runCatching {
+                                                      Chrome.evaluateJavascript(
+                                                          listOf(
+                                                              "console.log('ChromeXt probe ok')"))
+                                                      Log.i("probe evaluateJavascript issued")
+                                                  }
+                                                      .onFailure {
+                                                          Log.i("probe evaluate FAILED: " + it)
+                                                      }
+                                              },
+                                              5000,
+                                          )
+                                  } catch (t: Throwable) {
+                                      Log.i("probe schedule FAILED: " + t)
+                                  }
                               }
                           }
                   } else {
