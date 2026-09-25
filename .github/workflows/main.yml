@@ -525,13 +525,16 @@ jobs:
           import sys
           p = sys.argv[1]
           s = open(p, encoding='utf-8').read()
+          # 顺序敏感：'?: throw ...' 必须先替换。Reflect.kt 里裸 'throw NoSuchMethodException()'
+          # 出现两次（invokeMethod 一处 + findMethod 的 '?: throw ...' 内含一次），
+          # 先替换带 '?: ' 的那条，剩下才是 invokeMethod 的。
           pairs = [
-              ('throw NoSuchMethodException()',
-               'throw NoSuchMethodException("invokeMethod failed on " + this::class.java.name)'),
               ('?: throw NoSuchMethodException()',
                '?: throw NoSuchMethodException("findMethod failed on " + clz.name)'),
               ('?: throw NoSuchFieldException()',
                '?: throw NoSuchFieldException("findField failed on " + clz.name)'),
+              ('throw NoSuchMethodException()',
+               'throw NoSuchMethodException("invokeMethod failed on " + this::class.java.name)'),
           ]
           for old, new in pairs:
               n = s.count(old)
@@ -936,9 +939,16 @@ jobs:
           ./gradlew app:assembleRelease --no-daemon --stacktrace
 
       # ============================================================
-      # 11. 签名（secret 优先；未配置则产出未签名包）
+      # 11. 签名（secret 优先；未配置则自动生成固定 keystore，保证产物始终已签名）
       # ============================================================
+      # 固定 keystore 缓存：未配 secret 时自动生成，cache 命中即跨 run 同签名（可覆盖安装）
+      - uses: actions/cache@v4
+        with:
+          path: .ks
+          key: chromext-api102-ks-v1
+
       - name: Sign APK
+        working-directory: src      - name: Sign APK
         working-directory: src
         run: |
           set -e
@@ -959,6 +969,24 @@ jobs:
               echo "::warning::keystore 不合法或 alias/密码不匹配 -> 产出未签名 APK（base64 secret 里夹换行是 Tag number over 30 的常见成因）"
               KS_B64=""
             fi
+          fi
+          # secret 缺失或无效时：自动生成/复用固定 keystore（依赖 actions/cache 保持签名稳定）
+          if [ -z "$KS_B64" ]; then
+            KS_DIR="$GITHUB_WORKSPACE/.ks"
+            mkdir -p "$KS_DIR"
+            KS_GEN="$KS_DIR/release.jks"
+            if [ ! -f "$KS_GEN" ]; then
+              keytool -genkeypair -v -keystore "$KS_GEN" -storetype PKCS12 \
+                -alias chromext -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass chromext123 -keypass chromext123 \
+                -dname "CN=ChromeXt API102, O=local, C=CN" >/dev/null 2>&1
+              echo "::warning::未配置 keystore secret，已自动生成。签名依赖 actions/cache；cache 失效会换签名，建议配 KEYSTORE_B64"
+            fi
+            cp "$KS_GEN" "$RUNNER_TEMP/release.jks"
+            KS_B64="generated"
+            KS_PASS="chromext123"
+            KS_ALIAS="chromext"
+            KS_KEYPASS="chromext123"
           fi
           if [ -n "$KS_B64" ]; then
             "$BT/apksigner" sign \
