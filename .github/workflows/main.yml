@@ -484,6 +484,65 @@ jobs:
           PYEOF
 
       # ============================================================
+      # 5.6 去掉 UserScript 注入的 isLoading 门控
+      #     Chrome 155 把 TabImpl 字段名全混淆，mIsLoading 的位置启发式只能取到一个
+      #     无关 boolean（实测 i0）。若它为 false，onUpdateTargetUrl 里
+      #     `if (!url.startsWith("chrome") && isLoading)` 会完全跳过脚本注入
+      #     → 前端 manager 页面拿不到 ChromeXt 对象 → 报 "ChromeXt is not installed"。
+      #     去掉门控：URL 更新即注入。
+      # ============================================================
+      - name: Patch UserScript injection gate
+        working-directory: src
+        run: |
+          set -e
+          F=app/src/main/java/org/matrix/chromext/hook/UserScript.kt
+          test -f "$F"
+          python3 - "$F" <<'PYEOF'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          gate = '"chrome") && isLoading'
+          n = s.count(gate)
+          if n != 1:
+              raise SystemExit('FAIL: gate count=%d' % n)
+          s = s.replace(gate, '"chrome")')
+          open(p, 'w', encoding='utf-8').write(s)
+          print('OK: UserScript injection gate removed')
+          PYEOF
+
+      # ============================================================
+      # 5.7 让 findMethod / findField / invokeMethod 的异常带上类名
+      #     上游抛的是无参异常，日志里只有行号（如 PageMenu.kt:132），
+      #     无法判断到底在哪个类上找方法；补上类名后一轮即可定位。
+      # ============================================================
+      - name: Patch Reflect diagnostics
+        working-directory: src
+        run: |
+          set -e
+          F=app/src/main/java/org/matrix/chromext/utils/Reflect.kt
+          test -f "$F"
+          python3 - "$F" <<'PYEOF'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          pairs = [
+              ('throw NoSuchMethodException()',
+               'throw NoSuchMethodException("invokeMethod failed on " + this::class.java.name)'),
+              ('?: throw NoSuchMethodException()',
+               '?: throw NoSuchMethodException("findMethod failed on " + clz.name)'),
+              ('?: throw NoSuchFieldException()',
+               '?: throw NoSuchFieldException("findField failed on " + clz.name)'),
+          ]
+          for old, new in pairs:
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit('FAIL: %s count=%d' % (old, n))
+              s = s.replace(old, new)
+          open(p, 'w', encoding='utf-8').write(s)
+          print('OK: Reflect exceptions now carry class name')
+          PYEOF
+
+      # ============================================================
       # 6. 覆盖 Xposed 接入层 —— MainHook.kt
       #    legacy: IXposedHookLoadPackage + IXposedHookZygoteInit
       #    API102: XposedModule.onModuleLoaded + onPackageReady
