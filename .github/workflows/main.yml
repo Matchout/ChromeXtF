@@ -424,6 +424,45 @@ jobs:
           EOF
 
       # ============================================================
+      # 5.5 修补上游 proxy/UserScript.kt
+      #     根因：UserScriptProxy.<clinit> 里的字段启发式推导在 Chrome 155 上失败
+      #           （mId 的 findLast{Int}!! / mIsLoading 的 find{Boolean}!! 返回 null）
+      #           → ExceptionInInitializerError → UserScriptHook 整个装不上
+      #     改法：两处改成 by lazy，把异常从「类初始化期」推迟到「首次使用」
+      #           → 单个功能降级，不再拖垮整个 hook
+      # ============================================================
+      - name: Patch UserScriptProxy lazy init
+        working-directory: src
+        run: |
+          set -e
+          F=app/src/main/java/org/matrix/chromext/proxy/UserScript.kt
+          test -f "$F"
+          python3 - "$F" <<'PYEOF'
+          import sys
+          p = sys.argv[1]
+          s = open(p, encoding='utf-8').read()
+          orig = s
+
+          def wrap(s, decl, marker):
+              if s.count(decl) != 1:
+                  raise SystemExit('FAIL: %s count=%d' % (decl, s.count(decl)))
+              new_decl = decl[:-2] + ' by lazy {'
+              s = s.replace(decl, new_decl, 1)
+              i = s.index(new_decl)
+              j = s.index(marker, i) + len(marker)
+              nl = s.index('\n', j)
+              return s[:nl] + '\n    }' + s[nl:]
+
+          s = wrap(s, 'private val mId =', '.also { it.isAccessible = true }')
+          s = wrap(s, 'val mIsLoading =', '.also { it.isAccessible = true }')
+
+          if s == orig:
+              raise SystemExit('FAIL: no change applied')
+          open(p, 'w', encoding='utf-8').write(s)
+          print('OK: mId / mIsLoading -> by lazy')
+          PYEOF
+
+      # ============================================================
       # 6. 覆盖 Xposed 接入层 —— MainHook.kt
       #    legacy: IXposedHookLoadPackage + IXposedHookZygoteInit
       #    API102: XposedModule.onModuleLoaded + onPackageReady
@@ -521,6 +560,27 @@ jobs:
                           .forEach { ctor ->
                               ctor.hookAfter {
                                   Chrome.init(it.args[0] as Context, packageName)
+                                  // 诊断轮：dump Chrome 155 的字段布局，定位上游适配缺口
+                                  runCatching {
+                                      val tabImpl =
+                                          classLoader.loadClass(
+                                              "org.chromium.chrome.browser.tab.TabImpl")
+                                      Log.i(
+                                          "TabImpl: " +
+                                              tabImpl.declaredFields.joinToString(" ") {
+                                                  it.name + ":" + it.type.simpleName
+                                              })
+                                  }
+                                  runCatching {
+                                      val d =
+                                          classLoader.loadClass(
+                                              "org.chromium.chrome.browser.tab.TabWebContentsDelegateAndroidImpl")
+                                      Log.i(
+                                          "TabWCDAI: " +
+                                              d.declaredFields.joinToString(" ") {
+                                                  it.name + ":" + it.type.simpleName
+                                              })
+                                  }
                                   initHooks(UserScriptHook)
                                   if (ContextMenuHook.isInit) return@hookAfter
                                   runCatching {
