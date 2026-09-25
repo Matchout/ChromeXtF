@@ -563,17 +563,17 @@ jobs:
                                   // 诊断轮：dump Chrome 155 的字段布局，定位上游适配缺口
                                   runCatching {
                                       val tabImpl =
-                                          classLoader.loadClass(
-                                              "org.chromium.chrome.browser.tab.TabImpl")
+                                          Chrome.load("org.chromium.chrome.browser.tab.TabImpl")
                                       Log.i(
                                           "TabImpl: " +
                                               tabImpl.declaredFields.joinToString(" ") {
                                                   it.name + ":" + it.type.simpleName
                                               })
                                   }
+                                      .onFailure { Log.i("TabImpl dump FAILED: " + it) }
                                   runCatching {
                                       val d =
-                                          classLoader.loadClass(
+                                          Chrome.load(
                                               "org.chromium.chrome.browser.tab.TabWebContentsDelegateAndroidImpl")
                                       Log.i(
                                           "TabWCDAI: " +
@@ -581,6 +581,7 @@ jobs:
                                                   it.name + ":" + it.type.simpleName
                                               })
                                   }
+                                      .onFailure { Log.i("TabWCDAI dump FAILED: " + it) }
                                   initHooks(UserScriptHook)
                                   if (ContextMenuHook.isInit) return@hookAfter
                                   runCatching {
@@ -685,8 +686,12 @@ jobs:
               private fun initHooks(vararg hook: BaseHook) {
                   hook.forEach {
                       if (it.isInit) return@forEach
-                      it.init()
-                      if (it.isInit) Log.d("${it.javaClass.simpleName} hooked")
+                      // 单个 hook 失败不再阻塞其余 hook（Chrome 版本漂移时的降级路径）
+                      runCatching { it.init() }
+                          .onFailure { e -> Log.ex(e, it.javaClass.simpleName + ".init") }
+                      Log.i(
+                          it.javaClass.simpleName +
+                              (if (it.isInit) " hooked" else " NOT hooked"))
                   }
               }
 
