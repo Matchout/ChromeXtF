@@ -182,6 +182,48 @@ jobs:
         working-directory: src
         run: |
           set -e
+          # ==== [FILE] app/src/main/java/org/matrix/chromext/utils/HookParam.java ====
+          cat > app/src/main/java/org/matrix/chromext/utils/HookParam.java <<'EOF'
+          package org.matrix.chromext.utils;
+
+          /**
+           * 兼容层：与 legacy XC_MethodHook.MethodHookParam 字段同形。
+           *
+           * 必须用 Java 写。Java 字段是平台类型（Object! / Object[]!），
+           * 业务代码里的 it.thisObject::class、it.args[0]::class.java、
+           * 以及把 args 传给要求 Any 的函数都能原样编译；
+           * 换成 Kotlin 的 Any? / Array<Any?> 会一次性报出几十处 nullable 错误。
+           *
+           * result 用 private + getter/setter：Kotlin 侧 it.result = x 会走
+           * setResult()，从而置 returnEarly，复刻 legacy 的 before 阶段短路语义。
+           */
+          public class HookParam {
+              public Object thisObject;
+              public Object[] args;
+              public boolean returnEarly;
+              private Object result;
+
+              public HookParam(Object thisObject, java.util.List<?> args) {
+                  this.thisObject = thisObject;
+                  this.args = args == null ? new Object[0] : args.toArray();
+              }
+
+              public Object getResult() {
+                  return result;
+              }
+
+              public void setResult(Object result) {
+                  this.result = result;
+                  this.returnEarly = true;
+              }
+
+              /** HookBridge 内部用：写回 proceed() 结果，不触发短路 */
+              public void setResultInternal(Object result) {
+                  this.result = result;
+              }
+          }
+          EOF
+
           # ==== [FILE] app/src/main/java/org/matrix/chromext/utils/Hook.kt ====
           cat > app/src/main/java/org/matrix/chromext/utils/Hook.kt <<'EOF'
           package org.matrix.chromext.utils
@@ -191,30 +233,6 @@ jobs:
           import java.lang.reflect.Constructor
           import java.lang.reflect.Executable
           import java.lang.reflect.Method
-
-          /**
-           * 兼容层：保留 legacy XC_MethodHook.MethodHookParam 的字段语义
-           * （thisObject / args / result），使 ChromeXt 业务类不改一行即可编译。
-           */
-          class HookParam(
-              var thisObject: Any?,
-              var args: Array<Any?>,
-              var result: Any?,
-          ) {
-              private var resultSet = false
-
-              /** 对应 legacy param.setResult()：before 阶段调用会短路原方法 */
-              fun setResult(value: Any?) {
-                  result = value
-                  resultSet = true
-              }
-
-              internal fun consumeResultSet(): Boolean {
-                  val v = resultSet
-                  resultSet = false
-                  return v
-              }
-          }
 
           /** 对应 legacy XC_MethodHook.Unhook */
           class Unhook(private val handle: XposedInterface.HookHandle) {
@@ -266,20 +284,17 @@ jobs:
                           .setPriority(priority)
                           .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                           .intercept { chain ->
-                              val raw = chain.getArgs()
-                              val args = arrayOfNulls<Any?>(raw.size)
-                              for (i in raw.indices) args[i] = raw[i]
-                              val param = HookParam(chain.getThisObject(), args, null)
+                              val param = HookParam(chain.getThisObject(), chain.getArgs())
                               if (before != null) {
                                   try {
                                       before.invoke(param)
                                   } catch (t: Throwable) {
                                       Log.ex(t)
                                   }
-                                  // legacy 语义：before 阶段 setResult 即短路，不 proceed
-                                  if (param.consumeResultSet()) return@intercept param.result
+                                  // legacy 语义：before 阶段 setResult / 写 result 即短路
+                                  if (param.returnEarly) return@intercept param.result
                               }
-                              param.result = chain.proceed()
+                              param.setResultInternal(chain.proceed())
                               if (after != null) {
                                   try {
                                       after.invoke(param)
