@@ -456,6 +456,27 @@ jobs:
           s = wrap(s, 'private val mId =', '.also { it.isAccessible = true }')
           s = wrap(s, 'val mIsLoading =', '.also { it.isAccessible = true }')
 
+          # Chrome 155：TabImpl 字段名全被混淆，且 LoadUrlParams 字段移到列表末尾
+          # → maxOf(webContentsIdx, loadUrlParamsIdx) 把起点推到末尾，slice 内无 boolean
+          # → find 返回 null → !! 抛 NPE → PageMenuProxy.<clinit> 失败 → PageMenuHook NOT hooked
+          # 改为只以 WebContents 为起点，并保证最终非空（类型仍是 Field，调用方无需改）
+          i = s.index('val mIsLoading by lazy {')
+          j = s.index('val getUrl =', i)
+          s = s[:i] + (
+              'val mIsLoading =\n'
+              '    tabImpl.declaredFields\n'
+              '        .run {\n'
+              '            val wc = Chrome.load("org.chromium.content_public.browser.WebContents")\n'
+              '            val start = indexOfFirst { it.type == wc }.let { if (it >= 0) it else 0 }\n'
+              '            find { it.name == "mIsLoading" }\n'
+              '                ?: slice(start..size - 1).find {\n'
+              '                    it.type == Boolean::class.java && !Modifier.isStatic(it.modifiers)\n'
+              '                }\n'
+              '                ?: first { it.type == Boolean::class.java && !Modifier.isStatic(it.modifiers) }\n'
+              '        }\n'
+              '        .also { it.isAccessible = true }'
+          ) + '\n    ' + s[j:]
+
           if s == orig:
               raise SystemExit('FAIL: no change applied')
           open(p, 'w', encoding='utf-8').write(s)
@@ -686,9 +707,9 @@ jobs:
               private fun initHooks(vararg hook: BaseHook) {
                   hook.forEach {
                       if (it.isInit) return@forEach
-                      // 单个 hook 失败不再阻塞其余 hook（Chrome 版本漂移时的降级路径）
-                      runCatching { it.init() }
-                          .onFailure { e -> Log.ex(e, it.javaClass.simpleName + ".init") }
+                      // 关键：不能在这里 try/catch 吞掉 init() 的异常。上游依赖它抛出，
+                      // 由调用方的 runCatching.onFailure 回退到 ContextMenuHook。
+                      it.init()
                       Log.i(
                           it.javaClass.simpleName +
                               (if (it.isInit) " hooked" else " NOT hooked"))
