@@ -148,6 +148,8 @@ jobs:
 
           # ==== [FILE] "$D/scope.list" ====
           cat > "$D/scope.list" <<'EOF'
+          com.android.browser
+          com.mi.globalbrowser
           app.vanadium.browser
           com.android.chrome
           com.brave.browser
@@ -668,19 +670,35 @@ jobs:
                               packageName == "com.mi.globalbrowser" ||
                               packageName == "com.android.browser"
                       Chrome.isQihoo = packageName == "com.qihoo.contents"
-                      if (ctx == null && Chrome.isMi) return
+                      if (ctx == null && Chrome.isMi)
+                          Log.i("Mi: ctx unavailable at onPackageReady; generic path will be used")
                       // Wait to get the browser context of Mi Browser
                       if (ctx != null && packageName != "android") Chrome.init(ctx, ctx.packageName)
 
                       if (Chrome.isMi) {
-                          WebViewHook.WebView = Chrome.load("com.miui.webkit.WebView")
-                          runCatching {
-                              WebViewHook.ViewClient =
-                                  Chrome.load("com.android.browser.tab.TabWebViewClient")
-                              WebViewHook.ChromeClient =
-                                  Chrome.load("com.android.browser.tab.TabWebChromeClient")
-                          }
-                              .onFailure {
+                          // 小米浏览器 20.29.10928 实测链路（HyperOS 自研 webkit，非 android.webkit.*，也非 com.miui.webkit.*）：
+                          //   com.android.browser.Tab$MainWebViewClient
+                          //     -> com.android.browser.webview.AbsWebViewClient
+                          //     -> miui.browser.webview.o
+                          //     -> hyper.webkit.WebViewClient        (super = java.lang.Object)
+                          //   com.android.browser.Tab$MainWebChromeClient -> tf.b -> hyper.webkit.WebChromeClient
+                          //   实际 WebView 实现类 = hyper.webkit.WebView (super = android.widget.AbsoluteLayout, 含 mProvider 字段)
+                          // 旧硬编码 com.miui.webkit.WebView / com.android.browser.tab.TabWebViewClient 均不存在或不是本链，故必然静默失败
+                          WebViewHook.WebView =
+                              runCatching { Chrome.load("hyper.webkit.WebView") }
+                                  .onFailure { Log.ex(it, "Mi: hyper.webkit.WebView load failed") }
+                                  .getOrNull()
+                          WebViewHook.ViewClient =
+                              runCatching { Chrome.load("hyper.webkit.WebViewClient") }
+                                  .onFailure { Log.ex(it, "Mi: hyper.webkit.WebViewClient load failed") }
+                                  .getOrNull()
+                          WebViewHook.ChromeClient =
+                              runCatching { Chrome.load("hyper.webkit.WebChromeClient") }
+                                  .onFailure { Log.ex(it, "Mi: hyper.webkit.WebChromeClient load failed") }
+                                  .getOrNull()
+                          if (WebViewHook.ViewClient == null || WebViewHook.ChromeClient == null) {
+                              Log.i("Mi: Tab* class missing; probing MiuiAutologinBar")
+                              runCatching {
                                   // Use MiuiAutologinBar to find com.android.browser.tab.Tab
                                   val miuiAutologinBar =
                                       Chrome.load("com.android.browser.MiuiAutologinBar")
@@ -704,8 +722,18 @@ jobs:
                                           WebViewHook.ViewClient = it.type
                                   }
                               }
-                          hookWebView()
-                          return
+                                  .onFailure { Log.ex(it, "Mi: MiuiAutologinBar probe failed") }
+                          }
+                          Log.i(
+                              "Mi: WebView=" + WebViewHook.WebView +
+                                  ", ViewClient=" + WebViewHook.ViewClient +
+                                  ", ChromeClient=" + WebViewHook.ChromeClient
+                          )
+                          if (WebViewHook.ViewClient != null && WebViewHook.ChromeClient != null) {
+                              hookWebView()
+                              return
+                          }
+                          Log.i("Mi: dedicated classes unavailable; falling back to generic hooks")
                       }
                       if (Chrome.isQihoo) {
                           WebViewHook.WebView = Chrome.load("com.qihoo.webkit.WebView")
