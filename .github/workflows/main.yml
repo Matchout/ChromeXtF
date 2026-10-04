@@ -849,7 +849,7 @@ jobs:
                                   .onFailure { Log.ex(it, "Mi: hyper.webkit.WebViewClient load failed") }
                                   .getOrNull()
                           WebViewHook.ChromeClient =
-                              runCatching { Chrome.load("com.android.browser.Tab$MainWebChromeClient") }
+                              runCatching { Chrome.load("com.android.browser.Tab\$MainWebChromeClient") }
                                   .onFailure { Log.ex(it, "Mi: hyper.webkit.WebChromeClient load failed") }
                                   .getOrNull()
                           if (WebViewHook.ViewClient == null || WebViewHook.ChromeClient == null) {
