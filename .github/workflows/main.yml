@@ -558,8 +558,10 @@ jobs:
       - name: Patch upstream sources for Mi fixes
         working-directory: src
         run: |
-          set +e
-          # 已降级为 best-effort（真实断言在下一步 "(robust)" 里）
+          set -e
+          echo "DEPRECATED: superseded by the '(robust)' step below"
+          exit 0
+          # ---- 以下为历史实现，永不执行 ----
           python3 - <<'PYEOF'
           import re
 
