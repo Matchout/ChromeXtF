@@ -558,7 +558,8 @@ jobs:
       - name: Patch upstream sources for Mi fixes
         working-directory: src
         run: |
-          set -e
+          set +e
+          # 已降级为 best-effort（真实断言在下一步 "(robust)" 里）
           python3 - <<'PYEOF'
           import re
 
@@ -599,6 +600,92 @@ jobs:
                 '                ?.getMethod("setWebContentsDebuggingEnabled", Boolean::class.javaPrimitiveType!!)\n'
                 '                ?.invoke(null, true)\n'
                 '        }\n')
+          PYEOF
+
+      # ============================================================
+      # 6.06 上游源码补丁（稳健版，幂等）
+      #   用「函数名锚点 + 花括号配平」定位，不依赖上游具体排版；
+      #   三个补丁都幂等，重复运行不会二次修改。
+      # ============================================================
+      - name: Patch upstream sources for Mi fixes (robust)
+        working-directory: src
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          def read(p):
+              with open(p, encoding='utf-8', newline='') as f:
+                  return f.read()
+
+          def write(p, s):
+              with open(p, 'w', encoding='utf-8', newline='') as f:
+                  f.write(s)
+
+          def sub_once(path, old, new, done_marker):
+              s = read(path)
+              n = s.count(old)
+              if n == 1:
+                  write(path, s.replace(old, new, 1))
+                  print('OK  : %s' % path)
+              elif done_marker in s:
+                  print('SKIP: %s (already patched)' % path)
+              else:
+                  raise SystemExit('FAIL: %s count=%d' % (path, n))
+
+          def replace_fn(path, marker, new_body):
+              s = read(path)
+              if new_body.strip() in s:
+                  print('SKIP: %s (already patched)' % path)
+                  return
+              i = s.find(marker)
+              if i < 0:
+                  raise SystemExit('FAIL: %s marker %r not found' % (path, marker))
+              j = s.find('{', i)
+              if j < 0:
+                  raise SystemExit('FAIL: %s no body after marker' % path)
+              depth = 0
+              k = j
+              while k < len(s):
+                  c = s[k]
+                  if c == '{':
+                      depth += 1
+                  elif c == '}':
+                      depth -= 1
+                      if depth == 0:
+                          break
+                  k += 1
+              if depth != 0:
+                  raise SystemExit('FAIL: %s unbalanced braces' % path)
+              write(path, s[:i] + new_body + s[k + 1:])
+              print('OK  : %s' % path)
+
+          # (1) Mi 浏览器真实 socket 名是 webview_devtools_remote_<pid>
+          sub_once('app/src/main/java/org/matrix/chromext/devtools/WebSocketClient.kt',
+                   '"miui_webview_devtools_remote"',
+                   '"webview_devtools_remote_" + Process.myPid()',
+                   '"webview_devtools_remote_" + Process.myPid()')
+
+          # (2) invokeMethod(): 参数数组按被调方法形参个数裁剪/补齐
+          replace_fn('app/src/main/java/org/matrix/chromext/utils/Reflect.kt',
+                     'fun Any.invokeMethod(',
+                     'fun Any.invokeMethod(vararg args: Any?, condition: MethodCondition): Any? {\n'
+                     '    val method = findMethodOrNull(this::class.java, true, condition) ?: throw NoSuchMethodException()\n'
+                     '    val count = method.parameterTypes.size\n'
+                     '    val actual =\n'
+                     '        if (count == args.size) args\n'
+                     '        else Array<Any?>(count) { i -> if (i < args.size) args[i] else null }\n'
+                     '    return method.invoke(this, *actual)\n'
+                     '}')
+
+          # (3) Chrome.updateTab(): 主线程开 WebView DevTools
+          sub_once('app/src/main/java/org/matrix/chromext/Chrome.kt',
+                   'mTab = WeakReference(tab)',
+                   'mTab = WeakReference(tab)\n'
+                   '        runCatching {\n'
+                   '            WebViewHook.WebView\n'
+                   '                ?.getMethod("setWebContentsDebuggingEnabled", Boolean::class.javaPrimitiveType!!)\n'
+                   '                ?.invoke(null, true)\n'
+                   '        }',
+                   'setWebContentsDebuggingEnabled')
           PYEOF
 
       # ============================================================
