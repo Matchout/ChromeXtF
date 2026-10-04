@@ -550,6 +550,58 @@ jobs:
           PYEOF
 
       # ============================================================
+      # 6.05 上游源码补丁：与已在 APK 上实测的 smali 修复对齐（2026-10-04）
+      #   (1) devtools/WebSocketClient.kt connectDevTools(): Mi 的 socket 名
+      #   (2) utils/Reflect.kt            invokeMethod(): 参数数组按形参个数对齐
+      #   (3) Chrome.kt                   updateTab(): 主线程开启 WebView DevTools
+      # ============================================================
+      - name: Patch upstream sources for Mi fixes
+        working-directory: src
+        run: |
+          set -e
+          python3 - <<'PYEOF'
+          import re
+
+          def patch(path, old, new, regex=False):
+              s = open(path, encoding='utf-8').read()
+              n = len(re.findall(old, s, flags=re.S)) if regex else s.count(old)
+              if n != 1:
+                  raise SystemExit('FAIL: %s matched %d times' % (path, n))
+              s = re.sub(old, new, s, count=1, flags=re.S) if regex else s.replace(old, new, 1)
+              open(path, 'w', encoding='utf-8').write(s)
+              print('OK: %s' % path)
+
+          # (1) Mi 浏览器实际 socket 名是 webview_devtools_remote_<pid>
+          #     证据：libhyper_chromium.so .rodata 里的 "webview_devtools_remote_%d"
+          patch('app/src/main/java/org/matrix/chromext/devtools/WebSocketClient.kt',
+                '"miui_webview_devtools_remote"',
+                '"webview_devtools_remote_" + Process.myPid()')
+
+          # (2) 参数数组按被调方法的形参个数裁剪/补齐
+          #     （Mi 上具体 WebView 类声明的是 1 参 evaluateJavascript(String)）
+          patch('app/src/main/java/org/matrix/chromext/utils/Reflect.kt',
+                r'fun Any\.invokeMethod\(vararg args: Any\?, condition: MethodCondition\): Any\? \{.*?throw NoSuchMethodException\(\)\n\}',
+                'fun Any.invokeMethod(vararg args: Any?, condition: MethodCondition): Any? {\n'
+                '    val method = findMethodOrNull(this::class.java, true, condition) ?: throw NoSuchMethodException()\n'
+                '    val count = method.parameterTypes.size\n'
+                '    val actual =\n'
+                '        if (count == args.size) args else Array<Any?>(count) { i -> if (i < args.size) args[i] else null }\n'
+                '    return method.invoke(this, *actual)\n'
+                '}',
+                regex=True)
+
+          # (3) 在 Chrome.updateTab() 里开 DevTools（主线程、WebView provider 已就绪）
+          patch('app/src/main/java/org/matrix/chromext/Chrome.kt',
+                '        mTab = WeakReference(tab)\n',
+                '        mTab = WeakReference(tab)\n'
+                '        runCatching {\n'
+                '            WebViewHook.WebView\n'
+                '                ?.getMethod("setWebContentsDebuggingEnabled", Boolean::class.javaPrimitiveType!!)\n'
+                '                ?.invoke(null, true)\n'
+                '        }\n')
+          PYEOF
+
+      # ============================================================
       # 6. 覆盖 Xposed 接入层 —— MainHook.kt
       #    legacy: IXposedHookLoadPackage + IXposedHookZygoteInit
       #    API102: XposedModule.onModuleLoaded + onPackageReady
@@ -559,6 +611,21 @@ jobs:
         working-directory: src
         run: |
           set -e
+          # ============================================================
+          # 本工程注意（2026-10-04 校准）：
+          # 下列 3 处 Mi 修复原先只存在于「编译产物的 smali 层」，现已由上面的
+          # “Patch upstream sources for Mi fixes” 步骤在【源码层】落地：
+          #   1) utils/Reflect.kt            invokeMethod(): 参数数组按形参个数对齐
+          #      （对应 smali Lb/d;->o，修“脚本管理页闪退”）
+          #   2) Chrome.kt                   updateTab(): 主线程开 WebView DevTools
+          #      （对应 smali Lo/m;->m，开 CDP 前置）
+          #   3) devtools/WebSocketClient.kt connectDevTools(): Mi 的 socket 名
+          #      （对应 smali Lb/d;->c，改为 webview_devtools_remote_<pid>）
+          # 这三个补丁按【上游当前文本】锚定，上游一改就会 FAIL 退出（故意设计：
+          # 宁可构建失败，也不要静默不生效）。
+          # 已验证的源码级改动：Mi 三个类名 / ctx 静默早退 /
+          #   Chrome 用 ContextMenuHook 替代 PageMenuHook / scope.list 加小米浏览器
+          # ============================================================
           # ==== [FILE] app/src/main/java/org/matrix/chromext/MainHook.kt ====
           cat > app/src/main/java/org/matrix/chromext/MainHook.kt <<'EOF'
           package org.matrix.chromext
@@ -653,7 +720,7 @@ jobs:
                                       if (!Chrome.isVivaldi) initHooks(PreferenceHook)
                                       initHooks(
                                           if (Chrome.isEdge || Chrome.isCocCoc) PageInfoHook
-                                          else PageMenuHook
+                                          else ContextMenuHook
                                       )
                                   }
                                       .onFailure {
@@ -670,8 +737,8 @@ jobs:
                               packageName == "com.mi.globalbrowser" ||
                               packageName == "com.android.browser"
                       Chrome.isQihoo = packageName == "com.qihoo.contents"
-                      if (ctx == null && Chrome.isMi)
-                          Log.i("Mi: ctx unavailable at onPackageReady; generic path will be used")
+                      // ctx 未就绪时静默早退（pass 2 会带 ctx 再来一次），避免 pass 1 打出 4 条 NPE
+                      if (ctx == null && Chrome.isMi) return
                       // Wait to get the browser context of Mi Browser
                       if (ctx != null && packageName != "android") Chrome.init(ctx, ctx.packageName)
 
@@ -693,7 +760,7 @@ jobs:
                                   .onFailure { Log.ex(it, "Mi: hyper.webkit.WebViewClient load failed") }
                                   .getOrNull()
                           WebViewHook.ChromeClient =
-                              runCatching { Chrome.load("hyper.webkit.WebChromeClient") }
+                              runCatching { Chrome.load("com.android.browser.Tab$MainWebChromeClient") }
                                   .onFailure { Log.ex(it, "Mi: hyper.webkit.WebChromeClient load failed") }
                                   .getOrNull()
                           if (WebViewHook.ViewClient == null || WebViewHook.ChromeClient == null) {
