@@ -439,6 +439,11 @@ jobs:
           s = open(p, encoding='utf-8').read()
           orig = s
 
+          # 3.9.0 已内置 mId/mIsLoading 的 by lazy + r8Rank 启发式，跳过旧补丁
+          if 'private val mId: Field? by lazy' in s:
+              print('SKIP: upstream already has lazy mId/mIsLoading')
+              raise SystemExit(0)
+
           def wrap(s, decl, marker):
               if s.count(decl) != 1:
                   raise SystemExit('FAIL: %s count=%d' % (decl, s.count(decl)))
@@ -497,7 +502,9 @@ jobs:
           import sys
           p = sys.argv[1]
           s = open(p, encoding='utf-8').read()
-          gate = '"chrome") && isLoading'
+          gate = '"chrome") && proxy.isLoading(tab)'
+          if s.count(gate) != 1:
+              gate = '"chrome") && isLoading'
           n = s.count(gate)
           if n != 1:
               raise SystemExit('FAIL: gate count=%d' % n)
