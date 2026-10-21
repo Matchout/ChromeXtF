@@ -10,15 +10,15 @@ on:
       version_code:
         description: "versionCode"
         required: false
-        default: "17"
+        default: "18"
       version_name:
         description: "versionName"
         required: false
-        default: "3.8.3-api102"
+        default: "3.9.0-api102"
       upstream_ref:
         description: "上游 ref"
         required: false
-        default: "master"
+        default: "v3.9.0"
   push:
     tags:
       - "v*"
@@ -38,7 +38,7 @@ jobs:
       - name: Fetch upstream
         run: |
           set -e
-          REF="${{ github.event.inputs.upstream_ref || 'master' }}"
+          REF="${{ github.event.inputs.upstream_ref || 'v3.9.0' }}"
           git clone --depth=1 --branch "$REF" https://github.com/JingMatrix/ChromeXt.git src
           git -C src log -1 --format='upstream: %H %s'
 
@@ -67,15 +67,15 @@ jobs:
                   applicationId = "org.matrix.chromext"
                   minSdk = 23
                   targetSdk = 35
-                  versionCode = (System.getenv("VERSION_CODE") ?: "17").toInt()
-                  versionName = System.getenv("VERSION_NAME") ?: "3.8.3-api102"
+                  versionCode = (System.getenv("VERSION_CODE") ?: "18").toInt()
+                  versionName = System.getenv("VERSION_NAME") ?: "3.9.0-api102"
               }
 
               buildFeatures { buildConfig = true }
 
               buildTypes {
                   release {
-                      isShrinkResources = true
+                      isShrinkResources = false
                       isMinifyEnabled = true
                       proguardFiles("proguard-rules.pro")
                   }
@@ -150,7 +150,6 @@ jobs:
           cat > "$D/scope.list" <<'EOF'
           com.android.browser
           com.mi.globalbrowser
-          app.vanadium.browser
           com.android.chrome
           com.brave.browser
           com.brave.browser_beta
@@ -160,20 +159,12 @@ jobs:
           com.chrome.dev
           com.coccoc.trinhduyet
           com.coccoc.trinhduyet_beta
-          com.herond.android.browser
           com.kiwibrowser.browser
-          com.microsoft.emmx
-          com.microsoft.emmx.beta
-          com.microsoft.emmx.canary
-          com.microsoft.emmx.dev
           com.naver.whale
-          com.sec.android.app.sbrowser
-          com.sec.android.app.sbrowser.beta
           com.vivaldi.browser
           com.vivaldi.browser.snapshot
-          org.axpos.aosmium
+          io.github.jqssun.helium
           org.bromite.bromite
-          org.chromium.chrome
           org.chromium.thorium
           org.cromite.cromite
           org.greatfire.freebrowser
@@ -741,7 +732,6 @@ jobs:
 
           val supportedPackages =
               arrayOf(
-                  "app.vanadium.browser",
                   "com.android.chrome",
                   "com.brave.browser",
                   "com.brave.browser_beta",
@@ -751,20 +741,12 @@ jobs:
                   "com.chrome.dev",
                   "com.coccoc.trinhduyet",
                   "com.coccoc.trinhduyet_beta",
-                  "com.herond.android.browser",
                   "com.kiwibrowser.browser",
-                  "com.microsoft.emmx",
-                  "com.microsoft.emmx.beta",
-                  "com.microsoft.emmx.canary",
-                  "com.microsoft.emmx.dev",
                   "com.naver.whale",
-                  "com.sec.android.app.sbrowser",
-                  "com.sec.android.app.sbrowser.beta",
                   "com.vivaldi.browser",
                   "com.vivaldi.browser.snapshot",
-                  "org.axpos.aosmium",
+                  "io.github.jqssun.helium",
                   "org.bromite.bromite",
-                  "org.chromium.chrome",
                   "org.chromium.thorium",
                   "org.cromite.cromite",
                   "org.greatfire.freebrowser",
@@ -782,6 +764,33 @@ jobs:
                   XposedLogBridge.module = this
                   // 替代 legacy initZygote(startupParam.modulePath)
                   Resource.init(moduleApplicationInfo.sourceDir)
+                  hookContentResolverQuery()
+              }
+
+              private fun hookContentResolverQuery() {
+                  runCatching {
+                      val query =
+                          android.content.ContentResolver::class.java.getDeclaredMethod(
+                              "query",
+                              android.net.Uri::class.java,
+                              Array<String>::class.java,
+                              String::class.java,
+                              Array<String>::class.java,
+                              String::class.java,
+                          )
+                      hook(query).intercept { chain ->
+                          try {
+                              chain.proceed()
+                          } catch (t: Throwable) {
+                              if (t is SecurityException || t.cause is SecurityException) {
+                                  Log.d("ContentResolver.query denied: ${chain.args.getOrNull(0)}")
+                                  null
+                              } else {
+                                  throw t
+                              }
+                          }
+                      }
+                  }.onFailure { Log.ex(it, "hook ContentResolver.query failed") }
               }
 
               override fun onPackageReady(param: PackageReadyParam) {
@@ -808,7 +817,7 @@ jobs:
                                   runCatching {
                                       if (!Chrome.isVivaldi) initHooks(PreferenceHook)
                                       initHooks(
-                                          if (Chrome.isEdge || Chrome.isCocCoc) PageInfoHook
+                                          if (Chrome.isCocCoc) PageInfoHook
                                           else ContextMenuHook
                                       )
                                   }
@@ -1041,8 +1050,8 @@ jobs:
       - name: Build release
         working-directory: src
         env:
-          VERSION_CODE: ${{ github.event.inputs.version_code || '17' }}
-          VERSION_NAME: ${{ github.event.inputs.version_name || '3.8.3-api102' }}
+          VERSION_CODE: ${{ github.event.inputs.version_code || '18' }}
+          VERSION_NAME: ${{ github.event.inputs.version_name || '3.9.0-api102' }}
         run: |
           set -e
           chmod +x gradlew
