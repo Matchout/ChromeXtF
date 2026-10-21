@@ -180,6 +180,7 @@ jobs:
         working-directory: src
         run: |
           set -e
+          mkdir -p app/src/main/kotlin/org/matrix/chromext/utils app/src/main/java/org/matrix/chromext/utils
           # ==== [FILE] app/src/main/java/org/matrix/chromext/utils/HookParam.java ====
           cat > app/src/main/java/org/matrix/chromext/utils/HookParam.java <<'EOF'
           package org.matrix.chromext.utils;
@@ -222,8 +223,8 @@ jobs:
           }
           EOF
 
-          # ==== [FILE] app/src/main/java/org/matrix/chromext/utils/Hook.kt ====
-          cat > app/src/main/java/org/matrix/chromext/utils/Hook.kt <<'EOF'
+          # ==== [FILE] app/src/main/kotlin/org/matrix/chromext/utils/Hook.kt ====
+          cat > app/src/main/kotlin/org/matrix/chromext/utils/Hook.kt <<'EOF'
           package org.matrix.chromext.utils
 
           import io.github.libxposed.api.XposedInterface
@@ -346,8 +347,8 @@ jobs:
         working-directory: src
         run: |
           set -e
-          # ==== [FILE] app/src/main/java/org/matrix/chromext/utils/Log.kt ====
-          cat > app/src/main/java/org/matrix/chromext/utils/Log.kt <<'EOF'
+          # ==== [FILE] app/src/main/kotlin/org/matrix/chromext/utils/Log.kt ====
+          cat > app/src/main/kotlin/org/matrix/chromext/utils/Log.kt <<'EOF'
           package org.matrix.chromext.utils
 
           import android.content.Context
@@ -430,7 +431,7 @@ jobs:
         working-directory: src
         run: |
           set -e
-          F=app/src/main/java/org/matrix/chromext/proxy/UserScript.kt
+          F=app/src/main/kotlin/org/matrix/chromext/proxy/UserScript.kt
           test -f "$F"
           python3 - "$F" <<'PYEOF'
           import sys
@@ -490,7 +491,7 @@ jobs:
         working-directory: src
         run: |
           set -e
-          F=app/src/main/java/org/matrix/chromext/hook/UserScript.kt
+          F=app/src/main/kotlin/org/matrix/chromext/hook/UserScript.kt
           test -f "$F"
           python3 - "$F" <<'PYEOF'
           import sys
@@ -514,7 +515,7 @@ jobs:
         working-directory: src
         run: |
           set -e
-          F=app/src/main/java/org/matrix/chromext/utils/Reflect.kt
+          F=app/src/main/kotlin/org/matrix/chromext/utils/Reflect.kt
           test -f "$F"
           python3 - "$F" <<'PYEOF'
           import sys
@@ -567,13 +568,13 @@ jobs:
 
           # (1) Mi 浏览器实际 socket 名是 webview_devtools_remote_<pid>
           #     证据：libhyper_chromium.so .rodata 里的 "webview_devtools_remote_%d"
-          patch('app/src/main/java/org/matrix/chromext/devtools/WebSocketClient.kt',
+          patch('app/src/main/kotlin/org/matrix/chromext/devtools/WebSocketClient.kt',
                 '"miui_webview_devtools_remote"',
                 '"webview_devtools_remote_" + Process.myPid()')
 
           # (2) 参数数组按被调方法的形参个数裁剪/补齐
           #     （Mi 上具体 WebView 类声明的是 1 参 evaluateJavascript(String)）
-          patch('app/src/main/java/org/matrix/chromext/utils/Reflect.kt',
+          patch('app/src/main/kotlin/org/matrix/chromext/utils/Reflect.kt',
                 r'fun Any\.invokeMethod\(vararg args: Any\?, condition: MethodCondition\): Any\? \{.*?throw NoSuchMethodException\(\)\n\}',
                 'fun Any.invokeMethod(vararg args: Any?, condition: MethodCondition): Any? {\n'
                 '    val method = findMethodOrNull(this::class.java, true, condition) ?: throw NoSuchMethodException()\n'
@@ -585,7 +586,7 @@ jobs:
                 regex=True)
 
           # (3) 在 Chrome.updateTab() 里开 DevTools（主线程、WebView provider 已就绪）
-          patch('app/src/main/java/org/matrix/chromext/Chrome.kt',
+          patch('app/src/main/kotlin/org/matrix/chromext/Chrome.kt',
                 '        mTab = WeakReference(tab)\n',
                 '        mTab = WeakReference(tab)\n'
                 '        runCatching {\n'
@@ -652,13 +653,13 @@ jobs:
               print('OK  : %s' % path)
 
           # (1) Mi 浏览器真实 socket 名是 webview_devtools_remote_<pid>
-          sub_once('app/src/main/java/org/matrix/chromext/devtools/WebSocketClient.kt',
+          sub_once('app/src/main/kotlin/org/matrix/chromext/devtools/WebSocketClient.kt',
                    '"miui_webview_devtools_remote"',
                    '"webview_devtools_remote_" + Process.myPid()',
                    '"webview_devtools_remote_" + Process.myPid()')
 
           # (2) invokeMethod(): 参数数组按被调方法形参个数裁剪/补齐
-          replace_fn('app/src/main/java/org/matrix/chromext/utils/Reflect.kt',
+          replace_fn('app/src/main/kotlin/org/matrix/chromext/utils/Reflect.kt',
                      'fun Any.invokeMethod(',
                      'fun Any.invokeMethod(vararg args: Any?, condition: MethodCondition): Any? {\n'
                      '    val method = findMethodOrNull(this::class.java, true, condition) ?: throw NoSuchMethodException()\n'
@@ -670,7 +671,7 @@ jobs:
                      '}')
 
           # (3) Chrome.updateTab(): 主线程开 WebView DevTools
-          sub_once('app/src/main/java/org/matrix/chromext/Chrome.kt',
+          sub_once('app/src/main/kotlin/org/matrix/chromext/Chrome.kt',
                    'mTab = WeakReference(tab)',
                    'mTab = WeakReference(tab)\n'
                    '        runCatching {\n'
@@ -706,8 +707,8 @@ jobs:
           # 已验证的源码级改动：Mi 三个类名 / ctx 静默早退 /
           #   Chrome 用 ContextMenuHook 替代 PageMenuHook / scope.list 加小米浏览器
           # ============================================================
-          # ==== [FILE] app/src/main/java/org/matrix/chromext/MainHook.kt ====
-          cat > app/src/main/java/org/matrix/chromext/MainHook.kt <<'EOF'
+          # ==== [FILE] app/src/main/kotlin/org/matrix/chromext/MainHook.kt ====
+          cat > app/src/main/kotlin/org/matrix/chromext/MainHook.kt <<'EOF'
           package org.matrix.chromext
 
           import android.content.Context
@@ -973,12 +974,12 @@ jobs:
         working-directory: src
         run: |
           set -e
-          grep -rl 'de\.robv\.android\.xposed' app/src/main/java | tee /tmp/legacy_refs.txt
+          grep -rl 'de\.robv\.android\.xposed' app/src/main/kotlin | tee /tmp/legacy_refs.txt
           echo "--- files still referencing legacy API above ---"
 
           # 统一替换 import 与类型限定名
-          for f in app/src/main/java/org/matrix/chromext/hook/ContextMenu.kt \
-                   app/src/main/java/org/matrix/chromext/hook/PageMenu.kt ; do
+          for f in app/src/main/kotlin/org/matrix/chromext/hook/ContextMenu.kt \
+                   app/src/main/kotlin/org/matrix/chromext/hook/PageMenu.kt ; do
             [ -f "$f" ] || { echo "MISSING $f"; exit 1; }
             sed -i 's/^import de\.robv\.android\.xposed\.XC_MethodHook\.Unhook$/import org.matrix.chromext.utils.Unhook/' "$f"
             sed -i 's/de\.robv\.android\.xposed\.XC_MethodHook\.Unhook/org.matrix.chromext.utils.Unhook/g' "$f"
@@ -986,7 +987,7 @@ jobs:
           done
 
           echo "--- remaining legacy refs (should be empty) ---"
-          grep -rn 'de\.robv\.android\.xposed' app/src/main/java || echo "OK: none"
+          grep -rn 'de\.robv\.android\.xposed' app/src/main/kotlin || echo "OK: none"
 
       # ============================================================
       # 8. 删除 legacy 入口（assets/xposed_init + Manifest 四个 meta-data）
@@ -1022,21 +1023,21 @@ jobs:
           echo "--- files created/overlaid ---"
           ls -l app/src/main/resources/META-INF/xposed/
           for f in app/build.gradle.kts app/proguard-rules.pro \
-                   app/src/main/java/org/matrix/chromext/MainHook.kt \
-                   app/src/main/java/org/matrix/chromext/utils/Hook.kt \
-                   app/src/main/java/org/matrix/chromext/utils/Log.kt ; do
+                   app/src/main/kotlin/org/matrix/chromext/MainHook.kt \
+                   app/src/main/kotlin/org/matrix/chromext/utils/Hook.kt \
+                   app/src/main/kotlin/org/matrix/chromext/utils/Log.kt ; do
             printf '%8s  %s\n' "$(wc -c < "$f")" "$f"
           done
 
           echo "--- assert no legacy api import ---"
-          ! grep -rn 'de\.robv\.android\.xposed' app/src/main/java
+          ! grep -rn 'de\.robv\.android\.xposed' app/src/main/kotlin
 
           echo "--- assert no xposed_init / meta-data ---"
           test ! -e app/src/main/assets/xposed_init
           ! grep -q 'xposedmodule' app/src/main/AndroidManifest.xml
 
           echo "--- assert hook signature surface ---"
-          grep -c 'XposedInterface' app/src/main/java/org/matrix/chromext/utils/Hook.kt
+          grep -c 'XposedInterface' app/src/main/kotlin/org/matrix/chromext/utils/Hook.kt
 
       # ============================================================
       # 10. 构建
