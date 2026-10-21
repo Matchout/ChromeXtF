@@ -55,8 +55,6 @@ jobs:
           cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
-              id("org.jetbrains.kotlin.android")
-              id("com.ncorti.ktfmt.gradle")
           }
 
           android {
