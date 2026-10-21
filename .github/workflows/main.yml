@@ -685,6 +685,18 @@ jobs:
                    '                ?.invoke(null, true)\n'
                    '        }',
                    'setWebContentsDebuggingEnabled')
+
+          # (4) Resource.enrich(): 直接调用 addAssetPath(String)，避免 invokeMethod 选到错误 overload
+          sub_once('app/src/main/kotlin/org/matrix/chromext/Chrome.kt',
+                   'ctx.assets.invokeMethod(module_path!!) { name == "addAssetPath" }',
+                   'runCatching {\n'
+                   '            val path = module_path ?: return@runCatching\n'
+                   '            val m = android.content.res.AssetManager::class.java.getDeclaredMethod("addAssetPath", String::class.java)\n'
+                   '            m.isAccessible = true\n'
+                   '            val cookie = m.invoke(ctx.assets, path) as Int\n'
+                   '            Log.d("addAssetPath cookie=$cookie path=$path")\n'
+                   '        }.onFailure { Log.ex(it, "addAssetPath failed") }',
+                   'getDeclaredMethod("addAssetPath"')
           PYEOF
 
       # ============================================================
