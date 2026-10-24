@@ -10,15 +10,15 @@ on:
       version_code:
         description: "versionCode"
         required: false
-        default: "18"
+        default: "19"
       version_name:
         description: "versionName"
         required: false
-        default: "3.9.0-api102"
+        default: "3.9.1-api102"
       upstream_ref:
         description: "上游 ref"
         required: false
-        default: "v3.9.0"
+        default: "v3.9.1"
   push:
     tags:
       - "v*"
@@ -38,7 +38,7 @@ jobs:
       - name: Fetch upstream
         run: |
           set -e
-          REF="${{ github.event.inputs.upstream_ref || 'v3.9.0' }}"
+          REF="${{ github.event.inputs.upstream_ref || 'v3.9.1' }}"
           git clone --depth=1 --branch "$REF" https://github.com/JingMatrix/ChromeXt.git src
           git -C src log -1 --format='upstream: %H %s'
 
@@ -65,8 +65,8 @@ jobs:
                   applicationId = "org.matrix.chromext"
                   minSdk = 23
                   targetSdk = 35
-                  versionCode = (System.getenv("VERSION_CODE") ?: "18").toInt()
-                  versionName = System.getenv("VERSION_NAME") ?: "3.9.0-api102"
+                  versionCode = (System.getenv("VERSION_CODE") ?: "19").toInt()
+                  versionName = System.getenv("VERSION_NAME") ?: "3.9.1-api102"
               }
 
               buildFeatures { buildConfig = true }
@@ -1068,8 +1068,8 @@ jobs:
       - name: Build release
         working-directory: src
         env:
-          VERSION_CODE: ${{ github.event.inputs.version_code || '18' }}
-          VERSION_NAME: ${{ github.event.inputs.version_name || '3.9.0-api102' }}
+          VERSION_CODE: ${{ github.event.inputs.version_code || '19' }}
+          VERSION_NAME: ${{ github.event.inputs.version_name || '3.9.1-api102' }}
         run: |
           set -e
           chmod +x gradlew
